@@ -1,0 +1,10 @@
+{
+  "name": "vouch",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.2.21",
+  "scripts": {
+    "start": "bun run index.tsx",
+    "test": "bun test/unit.ts && bun test/run.ts"
+  }
+}
