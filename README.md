@@ -17,12 +17,14 @@ Listing checks and dispute evidence for Whop sellers. A product of Together Engi
 cd app
 bun test/unit.ts
 bun test/run.ts   # needs a local Postgres; see the top of the file
+# the same integration tests against the minified deploy build:
+./build-railway.sh && VOUCH_ENTRY=$PWD/dist/index.railway.tsx bun test/run.ts
 ```
 
 ## Deploy (Railway function)
 
 ```sh
-cd app && ./build-railway.sh   # writes dist/index.railway.tsx
+cd app && ./build-railway.sh   # writes dist/index.railway.tsx (bun build --minify, test-only exports dropped)
 ```
 
 Paste or push `dist/index.railway.tsx` as the function source. Secrets (Whop keys, admin and link secrets) live only in Railway variables, never in this repo.
