@@ -1,6 +1,6 @@
 // Local test for the v2 slice. Uses HTML fixtures because this sandbox can't reach whop.com.
 import { SQL } from "bun";
-const D = "/home/claude/vouch-v2/test";
+const D = import.meta.dir; // this test folder (fixtures and map.json live here)
 const F = `${D}/fixtures`;
 const MAP = `${D}/map.json`;
 const PORT = 3999;
@@ -11,6 +11,10 @@ const ADMIN = "admin-test-key";
 const VOUCH = "https://whop.com/vouch-sealed-proof/vouch-sealed-proof/";
 const TOM = "https://whop.com/tomwbtc/products/url-service/";
 const RISKY = "https://whop.com/demo/ecom-launch-lab/";
+const FREE_URL = "https://whop.com/test-store/vouch-free/";
+const DISC = "Vouch doesn't decide disputes or give legal advice.";
+// Copy rules: none of these may appear in our own pages (captured listing text is the seller's, so it is not scanned).
+const BANNED = /\bverified\b|\bproof\b|dispute-proof|win disputes|prevents disputes|protects payouts|FTC compliant|Stand behind|records a month/i;
 const sha = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");
 
 const setMap = (m: Record<string, string>) => Bun.write(MAP, JSON.stringify(m));
@@ -63,10 +67,10 @@ const signLink = (biz: string, user: string, expOffset = 600) => {
 };
 
 const sql = new SQL(DB);
-await sql`drop table if exists listing_versions`; await sql`drop table if exists listings`;
-const server = Bun.spawn(["bun", Bun.env.VOUCH_ENTRY || "/home/claude/vouch-v2/index.tsx"], {
+await sql`drop table if exists supporting_files`; await sql`drop table if exists listing_versions`; await sql`drop table if exists listings`;
+const server = Bun.spawn(["bun", Bun.env.VOUCH_ENTRY || `${D}/../index.tsx`], {
   env: { ...Bun.env, PORT: String(PORT), DATABASE_URL: DB, CAPTURE_FIXTURES: MAP, DEV_KEYS: PRO, ADMIN_KEY: ADMIN, BASE_URL: `http://localhost:${PORT}`,
-    WHOP_API_BASE: `http://localhost:${WHOP_PORT}`, WHOP_APP_API_KEY: WHOP_KEY, WHOP_APP_ID: APP_ID, LINK_SECRET },
+    WHOP_FREE_URL: FREE_URL, WHOP_API_BASE: `http://localhost:${WHOP_PORT}`, WHOP_APP_API_KEY: WHOP_KEY, WHOP_APP_ID: APP_ID, LINK_SECRET },
   stdout: "pipe", stderr: "pipe",
 });
 for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://localhost:${PORT}/health`)).ok) break; } catch {} await Bun.sleep(200); }
@@ -311,6 +315,105 @@ try {
   const relink = await call("POST", "/api/link", PRO, { t: signLink(BIZ2, "user_admin") });
   const ov = (await sql`select owner_verified from listings where id = ${lp.body.listing.id}`)[0];
   ok("relink to another business replaces it and clears old owner_verified", relink.status === 200 && relink.body?.relinked === true && ov.owner_verified === false && (await call("GET", "/api/me", PRO)).body?.whop?.biz === BIZ2, { relink: relink.body, ov });
+  // ---------- 15. supporting files ----------
+  const headNow = async () => (await sql`select seal_hash from (select seal_hash, sealed_at from reviews where seal_hash is not null union all select seal_hash, sealed_at from listing_versions union all select seal_hash, attached_at as sealed_at from supporting_files) s order by sealed_at desc limit 1`)[0].seal_hash;
+  const hist = await call("GET", `/api/listings/${id}/versions`, PRO);
+  const v2 = hist.body.versions.find((x: any) => x.no === 2);
+  // The pasted listing (section 9) has flagged claims; our own listing has none.
+  const pv = (await call("GET", `/api/listings/${pasted.body.listing.id}/versions`, PRO)).body.versions[0];
+  ok("versions API gives version id and its claims (with flags)", /^[A-Z0-9]{12}$/.test(v2?.id || "") && v2.claims.length > 3 && hist.body.versions.length === 3 && pv.claims.some((c: any) => c.flags.length), { id: v2?.id, claims: v2?.claims?.length, versions: hist.body.versions.length, pv: pv?.claims });
+  const vRow = async (vid: string) => (await sql`select sealed_payload, seal_hash from listing_versions where id = ${vid}`)[0];
+  const vBefore = await vRow(pv.id);
+  const head0 = await headNow();
+  const flaggedClaim = pv.claims.find((c: any) => c.flags.length);
+  const fileSha = sha("refund-policy.pdf contents");
+  const fileUrl = `/api/versions/${pv.id}/files`, fileUrl2 = `/api/versions/${v2.id}/files`;
+  const att = await call("POST", fileUrl, PRO, { claim: flaggedClaim.text, name: "refund-policy.pdf", mime: "application/pdf", sha256: fileSha.toUpperCase(), note: "Refund terms buyers see at checkout." });
+  ok("pro attaches a file to a flagged claim -> 201, intact", att.status === 201 && att.body?.file?.intact === true && att.body.file.sha256 === fileSha && att.body.file.version_id === pv.id, att.body);
+  ok("supporting file is its own chain record on the previous head", att.body?.file?.prev_hash === head0, { prev: att.body?.file?.prev_hash?.slice(0, 10), head: head0.slice(0, 10) });
+  const sf = (await sql`select * from supporting_files where id = ${att.body.file.id}`)[0];
+  const sfp = JSON.parse(sf.sealed_payload);
+  ok("stores name, sha256, mime, claim, version id, attached_at, note; payload links the version seal", sf.name === "refund-policy.pdf" && sf.sha256 === fileSha && sf.mime === "application/pdf" && sf.claim === flaggedClaim.text && sf.version_id === pv.id && !!sf.attached_at && sf.note === "Refund terms buyers see at checkout." && sfp.kind === "supporting_file" && sfp.version_seal_hash === vBefore.seal_hash && sf.seal_hash === sha(sf.prev_hash + sf.sealed_payload), sfp);
+  const vAfter = await vRow(pv.id);
+  ok("the sealed version itself is unchanged", vAfter.sealed_payload === vBefore.sealed_payload && vAfter.seal_hash === vBefore.seal_hash);
+  const plainClaim = v2.claims.find((c: any) => !c.flags.length);
+  const att2 = await call("POST", fileUrl2, PRO, { claim: plainClaim.text, name: "screenshot.png", mime: "image/png", sha256: sha("png bytes") });
+  ok("attach to an unflagged claim without a note -> 201, chained on the first file", att2.status === 201 && att2.body.file.note === null && att2.body.file.prev_hash === att.body.file.seal_hash, att2.body);
+  const hv2 = await call("GET", `/api/listings/${id}/versions`, PRO);
+  const pv2 = (await call("GET", `/api/listings/${pasted.body.listing.id}/versions`, PRO)).body.versions[0];
+  ok("versions API lists files on their own version, all intact", hv2.body.versions.find((x: any) => x.no === 2).files.map((f: any) => f.name).join() === "screenshot.png" && pv2.files.map((f: any) => f.name).join() === "refund-policy.pdf" && [...hv2.body.versions.flatMap((x: any) => x.files), ...pv2.files].every((f: any) => f.intact) && hv2.body.versions.filter((x: any) => x.no !== 2).every((x: any) => x.files.length === 0) && hv2.body.versions.every((x: any) => x.intact));
+  ok("bad sha256 -> 400", (await call("POST", fileUrl, PRO, { claim: flaggedClaim.text, name: "x.pdf", sha256: "abc123" })).status === 400);
+  ok("claim not on this version -> 400", (await call("POST", fileUrl, PRO, { claim: "A sentence that is not on the page.", name: "x.pdf", sha256: fileSha })).status === 400);
+  const longNote = await call("POST", fileUrl, PRO, { claim: flaggedClaim.text, name: "x.pdf", sha256: fileSha, note: "n".repeat(281) });
+  ok("note over 280 characters -> 400", longNote.status === 400 && /280/.test(longNote.body?.error || ""), longNote.body);
+  ok("no key -> 401", (await call("POST", fileUrl, undefined, { claim: flaggedClaim.text, name: "x.pdf", sha256: fileSha })).status === 401);
+  const fv1 = (await call("GET", `/api/listings/${f1.body.listing.id}/versions`, FREE)).body.versions[0];
+  const fr = await call("POST", `/api/versions/${fv1.id}/files`, FREE, { claim: fv1.claims[0].text, name: "a.pdf", sha256: fileSha });
+  ok("free account -> 402 with a plain upgrade message", fr.status === 402 && /^Supporting files are part of Starter and Pro\. Upgrade/.test(fr.body?.error || ""), fr.body);
+  ok("another account's version -> 404", (await call("POST", `/api/versions/${fv1.id}/files`, PRO, { claim: fv1.claims[0].text, name: "a.pdf", sha256: fileSha })).status === 404);
+  ok("nothing stored by rejected attempts", (await sql`select count(*)::int as n from supporting_files`)[0].n === 2);
+  const rv3 = await call("POST", "/api/reviews", PRO, { title: "Chain after a file", content: "This guide has six chapters. Each chapter ends with a checklist." });
+  const sealed3 = await call("POST", `/api/reviews/${rv3.body.id}/seal`, undefined, { token: new URL(rv3.body.review_url).searchParams.get("t"), verdicts: [{ idx: 0, verdict: "confirm" }, { idx: 1, verdict: "confirm" }] });
+  const nr3 = await call("GET", `/verify/${sealed3.body.code}`);
+  ok("next review seals onto the supporting file (one chain)", nr3.body?.intact === true && nr3.body?.prev_hash === att2.body.file.seal_hash);
+  await sql`update supporting_files set note = 'edited later' where id = ${sf.id}`;
+  const tam = await call("GET", `/api/listings/${pasted.body.listing.id}/versions`, PRO);
+  ok("editing a stored supporting file shows as a mismatch", tam.body.versions[0].files.find((f: any) => f.id === sf.id).intact === false);
+  await sql`update supporting_files set note = ${sf.note} where id = ${sf.id}`;
+
+  // ---------- 16. version history page ----------
+  const getPage = async (path: string, key?: string, cookie?: string) => {
+    const r = await fetch(`http://localhost:${PORT}${path}`, { headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), ...(cookie ? { cookie } : {}) } });
+    return { status: r.status, text: await r.text(), cc: r.headers.get("cache-control"), sc: r.headers.get("set-cookie") };
+  };
+  const shell = await getPage(`/listings/${id}`);
+  ok("history page without a key: 200 shell that reads the stored vouch_key, no versions", shell.status === 200 && /id="keybox"/.test(shell.text) && /localStorage\.getItem\('vouch_key'\)/.test(shell.text) && !/Version 1/.test(shell.text) && !BANNED.test(shell.text));
+  const hp = await getPage(`/listings/${id}`, PRO);
+  const count = (re: RegExp) => (hp.text.match(re) || []).length;
+  ok("pro history: 3 versions, each with first seen / last seen and full seal hash", hp.status === 200 && /Version 3[\s\S]*Version 2[\s\S]*Version 1/.test(hp.text) && count(/First seen/g) === 3 && count(/Last seen/g) === 3 && count(/seal sha-256 [a-f0-9]{64}/g) === 3, { status: hp.status, first: count(/First seen/g) });
+  ok("intact check on every version and file", count(/class="small ok">Intact</g) === 4 && !/Fingerprint mismatch/.test(hp.text), count(/class="small ok">Intact</g));
+  ok("diff: v2's new line highlighted, removed in v3 struck through", /<ins>[^<]*VOUCH-TEST/.test(hp.text) && /<del>[^<]*VOUCH-TEST/.test(hp.text) && /Changes since version 1: 1 line added, 1 removed/.test(hp.text), (hp.text.match(/Changes since[^<]*/g) || []));
+  ok("price lines shown; no flags on our own listing", /Price: \$9/.test(hp.text) && /0 of \d+ claims flagged/.test(hp.text) && !/class="fl"/.test(hp.text));
+  ok("supporting file listed on its version", /Version 2[\s\S]*screenshot\.png[\s\S]*Version 1/.test(hp.text) && hp.text.includes(sha("png bytes")));
+  const pp = await getPage(`/listings/${pasted.body.listing.id}`, PRO);
+  ok("flagged claims in amber with suggestion; file with name, fingerprint, claim, note; entered-by-you label", pp.status === 200 && /<div class="fl"><div class="small">Make \$1,000 your first week\.<\/div><div class="row"[^>]*><span class="pill amb">Income figure<\/span><\/div>/.test(pp.text) && pp.text.includes("Income figures need proof of typical results") && pp.text.includes("refund-policy.pdf") && pp.text.includes(fileSha) && pp.text.includes("Refund terms buyers see at checkout.") && pp.text.includes("Entered by you") && /class="small ok">Intact</.test(pp.text), pp.text.slice(pp.text.indexOf("claims flagged") - 20, pp.text.indexOf("claims flagged") + 400));
+  ok("paid: attach form fingerprints in the browser (crypto.subtle), never uploads", /<form class="att stack"/.test(hp.text) && /crypto\.subtle\.digest\('SHA-256'/.test(hp.text) && /never uploaded/.test(hp.text) && !/type="file"[^>]*multiple/.test(hp.text));
+  ok("disclaimer, not cacheable", hp.text.includes(DISC) && hp.cc === "no-store");
+  const frag = await getPage(`/listings/${id}?frag=1`, PRO);
+  ok("?frag=1 returns the fragment the page script loads", frag.status === 200 && !/<html/.test(frag.text) && /Version 3/.test(frag.text));
+  const fp = await getPage(`/listings/${f1.body.listing.id}`, FREE);
+  ok("free history: latest version only, earlier count + upgrade, no diff, no attach form", fp.status === 200 && /Version 2/.test(fp.text) && !/Version 1</.test(fp.text) && fp.text.includes("1 earlier version stored; upgrade to open it") && !/<ins>|<del>/.test(fp.text) && !/class="att/.test(fp.text) && /Supporting files are part of Starter and Pro/.test(fp.text), fp.text.match(/earlier version[^<]*/));
+  ok("free can't open another account's listing -> 404", (await getPage(`/listings/${id}`, FREE)).status === 404);
+  ok("inactive key -> 401", (await getPage(`/listings/${id}`, "not-a-real-key-123")).status === 401);
+
+  // ---------- 17. landing headline test ----------
+  const stats = async () => (await call("GET", `/admin/headline-test?key=${ADMIN}`)).body;
+  const s0 = await stats();
+  const seen: Record<string, number> = { A: 0, B: 0 };
+  for (let i = 0; i < 30; i++) { const r = await getPage("/"); const v = (r.sc?.match(/^vouch_hl=([AB]);/) || [])[1]; if (v) seen[v]++; }
+  ok("fresh visitors get a vouch_hl cookie; both variants appear", seen.A > 0 && seen.B > 0 && seen.A + seen.B === 30, seen);
+  const la = await getPage("/", undefined, "vouch_hl=A"), lb = await getPage("/", undefined, "x=1; vouch_hl=B");
+  ok("returning visitor keeps the variant and gets no new cookie", !la.sc && !lb.sc && la.text.includes(">Check your claims before buyers do.</h1>") && la.text.includes("One dispute at 20 sales puts you at 5%, five times Whop's 1% limit.") && lb.text.includes(">Keep a dated record of what your listing promised.</h1>") && lb.text.includes("If a buyer disputes, you'll have the version they saw.") && !la.text.includes("If a buyer disputes") && !lb.text.includes("One dispute at 20 sales"));
+  ok("landing: hero CTA -> /check, v2 pricing line, disclaimer, no v1 copy or banned words", /class="btn primary" href="\/check\?src=hero">Check my listing free</.test(la.text) && la.text.includes("Free: 1 listing, latest version visible, history kept 180 days") && la.text.includes("Starter $9/mo: 3 listings, full history, supporting files, evidence packs") && la.text.includes("Pro $29/mo: 15 listings and the badge") && la.text.includes(DISC) && !BANNED.test(la.text) && !BANNED.test(lb.text) && la.cc === "private, no-store");
+  await getPage("/check?src=hero", undefined, "vouch_hl=A"); await getPage("/check?src=hero", undefined, "vouch_hl=A"); await getPage("/check?src=hero", undefined, "vouch_hl=B");
+  await getPage("/check?src=hero"); await getPage("/check", undefined, "vouch_hl=A"); // not counted: no variant / not from the hero
+  const s1 = await stats();
+  const dlt = (v: string, k: string) => s1.variants[v][k] - s0.variants[v][k];
+  ok("admin/headline-test: views and clicks per variant", dlt("A", "views") === seen.A + 1 && dlt("B", "views") === seen.B + 1 && dlt("A", "clicks") === 2 && dlt("B", "clicks") === 1, s1);
+  ok("click rate = clicks / views, headline named", s1.variants.A.click_rate === Math.round((s1.variants.A.clicks / s1.variants.A.views) * 10000) / 10000 && s1.variants.B.headline === "Keep a dated record of what your listing promised.");
+  ok("admin/headline-test needs the admin key", (await call("GET", "/admin/headline-test?key=wrong")).status === 403 && (await call("GET", "/admin/headline-test")).status === 403);
+
+  // ---------- 18. free risk check page ----------
+  const ck = await getPage("/check");
+  ok("GET /check 200: one link field, button, calls /api/risk-check, disclaimer, no banned words", ck.status === 200 && ck.text.includes("Paste your Whop listing link") && ck.text.includes(">Check my listing free</button>") && (ck.text.match(/<input/g) || []).length === 1 && ck.text.includes("fetch('/api/risk-check'") && ck.text.includes(DISC) && !BANNED.test(ck.text) && /status===429/.test(ck.text));
+  await setMap({ [RISKY]: `${F}/risky.html`, [VOUCH]: `${F}/vouch-v1.html` });
+  const rh = await rcx(RISKY, "198.51.100.9");
+  ok("risk-check JSON unchanged without the html flag", rh.status === 200 && rh.body?.html === undefined && Array.isArray(rh.body?.claims));
+  const rhr = await fetch(`http://localhost:${PORT}/api/risk-check`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "198.51.100.9" }, body: JSON.stringify({ url: RISKY, html: 1 }) });
+  const rhb: any = await rhr.json();
+  const h = String(rhb?.html || "");
+  ok("/check result: title, price line, amber flags + suggestion, unflagged in grey", rhr.status === 200 && h.includes(">Ecom Launch Lab</h2>") && h.includes("Price: $97 one-time") && /<div class="fl"><div class="small">Make \$5,000[^<]*<\/div><div class="row"[^>]*><span class="pill amb">Income figure<\/span><span class="pill amb">Time promise<\/span>/.test(h) && h.includes("Income figures need proof of typical results") && /<div class="small dim">Step-by-step video lessons/.test(h), h.slice(0, 400));
+  ok("/check result: CTA to the Free plan, disclaimer, flagged count", h.includes(`href="${FREE_URL}">Start watching it free</a>`) && h.includes(DISC) && /\d+ of \d+ claims worth a look/.test(h));
 } catch (e) {
   fail++; console.log("ERROR", e);
 } finally {

@@ -1,4 +1,5 @@
-// Unit tests for "Connect your Whop": JWT verify (local ES256 key + fake JWKS), signed link token, product URL, plan lines.
+// Unit tests: Whop JWT verify (local ES256 key + fake JWKS), signed link token, product URL, plan lines,
+// version diff, headline variants, supporting-file checks and seals, page escaping.
 // Imports index.tsx with VOUCH_UNIT_TEST=1, so no database or server is started.
 const JWKS_PORT = 3997;
 const KID = "test-kid-1";
@@ -102,6 +103,53 @@ try {
   ok("withPlans: lines after header, hash recomputed", wp.text.split("\n").slice(2, 4).join("|") === "Price option: $9 / 30 days, 7-day trial|Price option: $29 / 30 days, 7-day trial" && wp.listingHash === new Bun.CryptoHasher("sha256").update(wp.text).digest("hex") && wp.plansCount === 2, wp.text);
   ok("withPlans: idempotent (re-applying doesn't duplicate)", V.withPlans(wp, wp.plans).text === wp.text);
   ok("stripHeader removes header and plan lines (not offered as claims)", V.stripHeader(wp.text) === "Vouch\nBody line here.", V.stripHeader(wp.text));
+
+  // ----- version history: line diff -----
+  const D = (a: string, b: string) => V.lineDiff(a ? a.split("\n") : [], b.split("\n")).map((d: any) => d.op + d.line).join("|");
+  ok("diff: added, removed and unchanged lines", D("a\nb\nc", "a\nB\nc\nd") === " a|-b|+B| c|+d", D("a\nb\nc", "a\nB\nc\nd"));
+  ok("diff: identical text -> no changes", D("x\ny", "x\ny") === " x| y");
+  ok("diff: nothing before -> every line added", D("", "x\ny") === "+x|+y");
+  ok("diff: moved line shows as removed + added", D("a\nb\nc", "b\nc\na") === "-a| b| c|+a", D("a\nb\nc", "b\nc\na"));
+  const big = Array.from({ length: 2100 }, (_, i) => `line ${i}`);
+  ok("diff: very long texts fall back without building a huge table", V.lineDiff(big, [...big, "new"]).length === 4201);
+
+  // ----- headline test: variant cookie -----
+  ok("variant: cookie A kept, not new", JSON.stringify(V.headlineVariant("vouch_hl=A")) === '{"v":"A","isNew":false}');
+  ok("variant: cookie B among others kept", JSON.stringify(V.headlineVariant("x=1; vouch_hl=B; y=2")) === '{"v":"B","isNew":false}');
+  ok("variant: unknown value or other cookie name -> new assignment", V.headlineVariant("vouch_hl=C").isNew && V.headlineVariant("notvouch_hl=A").isNew && V.headlineVariant(null).isNew);
+  ok("variant: rand < 0.5 -> A, else B", V.headlineVariant(null, () => 0.49).v === "A" && V.headlineVariant(null, () => 0.5).v === "B");
+  let nA = 0; for (let i = 0; i < 4000; i++) if (V.headlineVariant(null).v === "A") nA++;
+  ok("variant: roughly 50/50 with Math.random", nA > 1800 && nA < 2200, nA);
+  const BANNED = /\bverified\b|\bproof\b|dispute-proof|win disputes|prevents disputes|protects payouts|FTC compliant|Stand behind|records a month/i;
+  const lA = V.landingPage("A"), lB = V.landingPage("B");
+  ok("landing A: headline + dispute-math line", lA.includes(">Check your claims before buyers do.</h1>") && lA.includes("One dispute at 20 sales puts you at 5%, five times Whop's 1% limit."));
+  ok("landing B: headline + sub-line", lB.includes(">Keep a dated record of what your listing promised.</h1>") && lB.includes("If a buyer disputes, you'll have the version they saw."));
+  ok("landing: CTA to /check, disclaimer, no banned words, no green-check approval", lA.includes('href="/check?src=hero"') && lA.includes("Vouch doesn't decide disputes or give legal advice.") && !BANNED.test(lA) && !BANNED.test(lB));
+
+  // ----- supporting files -----
+  const H = "ab".repeat(32), claims = ["Make $1,000 your first week.", "Weekly group calls."];
+  let a: any = V.checkAttachment({ claim: claims[0], name: " refund.pdf ", sha256: H.toUpperCase(), mime: "application/pdf", note: "n".repeat(280) }, claims);
+  ok("attachment: valid input normalised (sha lowercased, name trimmed, 280-char note ok)", a.sha256 === H && a.name === "refund.pdf" && a.note.length === 280 && a.mime === "application/pdf", a);
+  ok("attachment: empty note -> null", V.checkAttachment({ claim: claims[1], name: "x", sha256: H, note: "  " }, claims).note === null);
+  ok("attachment: 281-char note rejected", /280/.test(V.checkAttachment({ claim: claims[0], name: "x", sha256: H, note: "n".repeat(281) }, claims).error || ""));
+  ok("attachment: claim must be on the version", !!V.checkAttachment({ claim: "Something else.", name: "x", sha256: H }, claims).error);
+  ok("attachment: bad sha / missing name rejected", !!V.checkAttachment({ claim: claims[0], name: "x", sha256: "zz" }, claims).error && !!V.checkAttachment({ claim: claims[0], sha256: H }, claims).error);
+  const f: any = { id: "F1", listing_id: "L1", version_id: "V1", claim: claims[0], name: "refund.pdf", sha256: H, mime: null, note: "terms", attached_at: new Date("2026-11-10T12:00:00Z"), prev_hash: "p".repeat(64) };
+  f.sealed_payload = V.filePayload(f, "vseal"); f.seal_hash = new Bun.CryptoHasher("sha256").update(f.prev_hash + f.sealed_payload).digest("hex");
+  ok("file seal: intact round trip, payload links the version seal", V.fileIntact(f, "vseal") && JSON.parse(f.sealed_payload).version_seal_hash === "vseal" && JSON.parse(f.sealed_payload).kind === "supporting_file");
+  ok("file seal: edited note or different version seal -> not intact", !V.fileIntact({ ...f, note: "edited" }, "vseal") && !V.fileIntact(f, "other-seal"));
+
+  // ----- page fragments escape listing text -----
+  const evil = "<script>alert(1)</script>";
+  const cr = V.checkResultHtml(evil, `Price: $9 / month\n${evil}`, [{ text: evil, flags: ["income"], suggestion: evil }, { text: "plain " + evil, flags: [], suggestion: null }]);
+  ok("/check result: title, price, claims and suggestions escaped", !cr.includes("<script>") && cr.includes("&lt;script&gt;") && cr.includes("Price: $9 / month") && cr.includes('class="pill amb">Income figure') && cr.includes('class="small dim">plain'));
+  const lst = { id: "L1", url: "https://whop.com/a/b/", title: evil, status: "active" };
+  const row = (no: number, text: string) => ({ id: "V" + no, version_no: no, text, listing_hash: "x", source: "captured", first_seen_at: new Date(), last_seen_at: new Date(), sealed_at: new Date(), seal_hash: "s".repeat(64), prev_hash: "" });
+  const rows = [row(3, "Price: $9 / month\nnew line\nsame line"), row(2, "Price: $9 / month\nold line\nsame line"), row(1, "Price: $9 / month\nfirst")];
+  const paidH = V.historyHtml({ listing: lst, rows, files: [], paid: true });
+  ok("history (paid): every version, diff marks, title escaped", /Version 3[\s\S]*Version 2[\s\S]*Version 1/.test(paidH) && paidH.includes("<ins>new line</ins>") && paidH.includes("<del>old line</del>") && !paidH.includes("<script>") && paidH.includes('<form class="att stack"'));
+  const freeH = V.historyHtml({ listing: lst, rows, files: [], paid: false });
+  ok("history (free): latest only, '2 earlier versions stored; upgrade to open them', no diff, no form", freeH.includes("Version 3") && !freeH.includes("Version 2") && freeH.includes("2 earlier versions stored; upgrade to open them") && !/<ins>|<del>/.test(freeH) && !freeH.includes('class="att'));
 
   // ----- rate limiter address -----
   const req = (xff?: string) => new Request("http://x/", { headers: xff ? { "x-forwarded-for": xff } : {} });

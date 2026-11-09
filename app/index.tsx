@@ -142,6 +142,23 @@ await sql`alter table accounts add column if not exists whop_user_id text`;
 await sql`alter table accounts add column if not exists linked_at timestamptz`;
 await sql`alter table listings add column if not exists whop_biz_id text`;
 await sql`alter table listing_versions add column if not exists plans text`;
+// Supporting files: a fingerprint (never the file) attached to one claim of a listing version.
+// Each is sealed into the chain as its own record linked to the version; the version itself is never changed.
+await sql`create table if not exists supporting_files (
+  id text primary key,
+  version_id text not null references listing_versions(id) on delete cascade,
+  listing_id text not null,
+  claim text not null,
+  name text not null,
+  sha256 text not null,
+  mime text,
+  note text,
+  attached_at timestamptz not null,
+  prev_hash text,
+  seal_hash text,
+  sealed_payload text
+)`;
+await sql`create index if not exists supporting_files_listing_idx on supporting_files (listing_id)`;
 }
 
 // ---------- helpers ----------
@@ -480,7 +497,7 @@ function page(title: string, body: string, opts: { desc?: string; script?: strin
 <title>${esc(title)}</title>${opts.desc ? `<meta name="description" content="${esc(opts.desc)}">` : ""}
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600;700&display=swap">
 <style>
-:root{--bg:#0C0F13;--panel:#151A21;--panel2:#10141A;--line:#232B35;--ink:#F4F7F2;--ink2:#9AA7B0;--ink3:#8C97A0;--volt:#C8F545;--red:#E24B4A;--redbg:#2A1416;--redink:#F09595}
+:root{--bg:#0C0F13;--panel:#151A21;--panel2:#10141A;--line:#232B35;--ink:#F4F7F2;--ink2:#9AA7B0;--ink3:#8C97A0;--volt:#C8F545;--red:#E24B4A;--redbg:#2A1416;--redink:#F09595;--amber:#F5B445}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif;line-height:1.5}
 a{color:var(--volt)}h1,h2,h3{font-family:'Space Grotesk',sans-serif;font-weight:700;line-height:1.15;margin:0}
 .wrap{max-width:640px;margin:0 auto;padding:22px 18px 60px}.wide{max-width:960px}
@@ -491,30 +508,51 @@ a{color:var(--volt)}h1,h2,h3{font-family:'Space Grotesk',sans-serif;font-weight:
 .btn{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:0 16px;border-radius:10px;font:600 14px Inter,sans-serif;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--ink2);text-decoration:none}
 .btn.primary{background:var(--volt);color:#0C0F13;border:none}.btn.full{width:100%;min-height:52px;font-size:15px;font-weight:700}
 .btn:disabled{opacity:.45;cursor:not-allowed}
-input,textarea{width:100%;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:12px;font:15px Inter,sans-serif}
+input,textarea,select{width:100%;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:12px;font:15px Inter,sans-serif}
 textarea{min-height:180px;resize:vertical}label{display:block;font-size:13px;color:var(--ink2);margin:14px 0 6px}
 .pill{display:inline-block;font-size:12px;font-weight:600;border-radius:999px;padding:5px 10px}
 .stack{display:flex;flex-direction:column;gap:10px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .hash{font-family:'Space Grotesk',monospace;font-size:12px;color:var(--ink2);word-break:break-all}
 .err{color:var(--redink);font-size:13px;margin-top:8px}
+h3{font-size:15px}.amb{background:rgba(245,180,69,.12);color:var(--amber);border:1px solid var(--amber)}.fl{border-left:2px solid var(--amber);padding-left:10px}.dim{color:var(--ink3)}
+.ok{font-weight:600;color:var(--volt)}.bad{font-weight:600;color:var(--redink)}
+.diff{font-size:13px;white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 0}.diff>*{display:block;padding:1px 8px;text-decoration:none;color:var(--ink2)}
+.diff ins{background:rgba(200,245,69,.13);border-left:2px solid var(--volt);color:var(--ink)}.diff del{color:var(--ink3);text-decoration:line-through}
 </style></head><body>${body}${opts.script ? `<script>${opts.script}</script>` : ""}</body></html>`;
 }
 
 const topbar = (right = "") =>
   `<div class="top"><a class="brand" href="/">${LOGO()}<span>vouch</span></a>${right}</div>`;
 
-function landingPage() {
-  return page("Vouch — stand behind what you're selling", `<div class="wrap wide">
-${topbar(`<div class="row"><a class="btn" href="/registry">Look up a seller</a><a class="btn primary" href="${esc(WHOP_PRODUCT_URL)}">Join on Whop</a></div>`)}
-<div style="padding:40px 0 24px;max-width:680px">
-<h1 style="font-size:44px">Stand behind what you're selling</h1>
-<p class="muted" style="font-size:18px;margin:16px 0 22px">One command sends your AI's work to you for review. Tap to confirm, fix, or flag each claim. Get a sealed, timestamped record — hosted by us, checkable by anyone. Already launched? Verify the claims on your live sales page today.</p>
-<div class="row"><a class="btn primary" href="${esc(WHOP_FREE_URL)}">Start free</a><a class="btn" href="${esc(WHOP_PRODUCT_URL)}">See paid plans</a><a class="btn" href="/app">I have a key</a></div>
-<p class="tiny" style="margin:10px 0 0">Free: 3 records a month · Starter $9/mo: 20 · Pro $29/mo: unlimited + badge. 7-day trial on paid plans.</p>
+const DISCLAIMER = "Vouch doesn't decide disputes or give legal advice.";
+const PRICING_LINE = "Free: 1 listing, latest version visible, history kept 180 days · Starter $9/mo: 3 listings, full history, supporting files, evidence packs · Pro $29/mo: 15 listings and the badge. 7-day trial on paid plans.";
+// Landing-page headline test: one variant per visitor (cookie), 50/50.
+const HEADLINES = {
+  A: ["Check your claims before buyers do.", "One dispute at 20 sales puts you at 5%, five times Whop's 1% limit."],
+  B: ["Keep a dated record of what your listing promised.", "If a buyer disputes, you'll have the version they saw."],
+} as const;
+type Variant = keyof typeof HEADLINES;
+const HL_COOKIE = "vouch_hl";
+function headlineVariant(cookie: string | null, rand = Math.random): { v: Variant; isNew: boolean } {
+  const m = (cookie || "").match(/(?:^|;)\s*vouch_hl=([AB])(?:;|$)/);
+  return m ? { v: m[1] as Variant, isNew: false } : { v: rand() < 0.5 ? "A" : "B", isNew: true };
+}
+
+function landingPage(v: Variant) {
+  const [headline, sub] = HEADLINES[v];
+  return page("Vouch — a dated record of what your Whop listing said", `<div class="wrap wide">
+${topbar(`<div class="row"><a class="btn" href="/app">I have a key</a><a class="btn primary" href="${esc(WHOP_FREE_URL)}">Start free</a></div>`)}
+<div style="padding:40px 0 24px;max-width:680px" data-variant="${v}">
+<h1 style="font-size:44px">${headline}</h1>
+<p style="font-size:20px;margin:14px 0 0">${sub}</p>
+<p class="muted" style="font-size:17px;margin:14px 0 22px">Vouch reads your public Whop listing, flags claims that often lead to disputes (income figures, guarantees, time promises, urgency, words like "always" and "never"), and re-checks the page every day. Each change is saved as a dated, sealed version you can open later.</p>
+<div class="row"><a class="btn primary" href="/check?src=hero">Check my listing free</a><a class="btn" href="${esc(WHOP_PRODUCT_URL)}">See plans</a></div>
+<p class="tiny" style="margin:10px 0 0">${PRICING_LINE}</p>
+<p class="tiny" style="margin:4px 0 0">${DISCLAIMER}</p>
 </div>
-<div class="card" style="max-width:680px"><h3 style="font-size:16px;margin-bottom:6px">What a sealed record proves</h3>
-<p class="small muted" style="margin:0">That a named person checked these specific claims, when, and how long they spent. It does not rate the product. Records with fixes show real scrutiny happened, and every record's fingerprint changes if anything in it is altered.</p></div>
-</div>`, { desc: "Human-reviewed, sealed records of the claims you sell with." });
+<div class="card" style="max-width:680px"><h3 style="font-size:16px;margin-bottom:6px">What a version record shows</h3>
+<p class="small muted" style="margin:0">What the public listing said, its price lines, and when Vouch first and last saw it. Each record's fingerprint includes the one sealed before it, so a later edit to any record shows up as a mismatch. It doesn't rate your product.</p></div>
+</div>`, { desc: "Vouch flags risky claims in your Whop listing and keeps a dated record of every version." });
 }
 
 // Same key prompt on /app and /link.
@@ -641,17 +679,12 @@ function badgeSvg(rec: any) {
 
 async function registryPage(q: string) {
   const term = q.trim();
-  const rows = term
-    ? await sql`select seller_name, seller_slug, count(*)::int as records,
+  const like = "%" + term + "%";
+  const rows = await sql`select seller_name, seller_slug, count(*)::int as records,
           sum(case when exists (select 1 from claims c where c.review_id = r.id and c.verdict <> 'confirm') then 1 else 0 end)::int as with_fixes,
           max(sealed_at) as last_sealed
         from reviews r where code is not null and seller_slug is not null
-          and (seller_name ilike ${"%" + term + "%"} or product_name ilike ${"%" + term + "%"} or title ilike ${"%" + term + "%"})
-        group by seller_name, seller_slug order by max(sealed_at) desc limit 30`
-    : await sql`select seller_name, seller_slug, count(*)::int as records,
-          sum(case when exists (select 1 from claims c where c.review_id = r.id and c.verdict <> 'confirm') then 1 else 0 end)::int as with_fixes,
-          max(sealed_at) as last_sealed
-        from reviews r where code is not null and seller_slug is not null
+          and (${term} = '' or seller_name ilike ${like} or product_name ilike ${like} or title ilike ${like})
         group by seller_name, seller_slug order by max(sealed_at) desc limit 30`;
   const list = rows.length
     ? rows.map((s: any) => `<a class="card" href="/s/${esc(s.seller_slug)}" style="display:block;text-decoration:none;color:inherit"><div style="font-weight:600">${esc(s.seller_name)}</div>
@@ -709,6 +742,8 @@ async function chainHead(tx: any): Promise<string> {
       select seal_hash, sealed_at from reviews where seal_hash is not null
       union all
       select seal_hash, sealed_at from listing_versions where seal_hash is not null
+      union all
+      select seal_hash, attached_at from supporting_files where seal_hash is not null
     ) s order by sealed_at desc limit 1`;
   return h?.seal_hash || "genesis";
 }
@@ -1269,16 +1304,27 @@ async function listListings(acct: Account) {
     from listings l where l.account_key_hash = ${acct.key_hash} order by l.created_at`;
 }
 
-async function listingVersions(acct: Account, id: string) {
+const isPaid = (acct: Account) => acct.plan === "starter" || acct.plan === "pro";
+
+// Every stored version (newest first) and its supporting files, for an account's own listing.
+async function loadHistory(acct: Account, id: string) {
   const [listing] = await sql`select * from listings where id = ${id} and account_key_hash = ${acct.key_hash}`;
   if (!listing) return null;
   const rows = await sql`select * from listing_versions where listing_id = ${id} order by version_no desc`;
+  const files = await sql`select * from supporting_files where listing_id = ${id} order by attached_at`;
+  return { listing, rows, files, paid: isPaid(acct) };
+}
+
+async function listingVersions(acct: Account, id: string) {
+  const h = await loadHistory(acct, id);
+  if (!h) return null;
+  const { listing, rows, files, paid } = h;
   const shape = (v: any) => ({
-    no: v.version_no, source: v.source, first_seen_at: v.first_seen_at, last_seen_at: v.last_seen_at, title: v.title,
+    id: v.id, no: v.version_no, source: v.source, first_seen_at: v.first_seen_at, last_seen_at: v.last_seen_at, title: v.title,
     default_plan: v.default_plan ? JSON.parse(v.default_plan) : null, plans_count: v.plans_count, text: v.text,
-    seal_hash: v.seal_hash, intact: verifyVersion(listing, v),
+    seal_hash: v.seal_hash, intact: verifyVersion(listing, v), claims: versionClaims(v),
+    files: files.filter((f: any) => f.version_id === v.id).map((f: any) => shapeFile(f, v.seal_hash)),
   });
-  const paid = acct.plan === "starter" || acct.plan === "pro";
   const visible = paid ? rows : rows.slice(0, 1);
   return {
     listing: { id: listing.id, url: listing.url, title: listing.title, status: listing.status },
@@ -1287,6 +1333,184 @@ async function listingVersions(acct: Account, id: string) {
     note: paid ? null : rows.length > 1 ? `${rows.length - 1} earlier version${rows.length - 1 === 1 ? " is" : "s are"} stored. Upgrade to open the full history and evidence packs.` : null,
     versions: visible.map(shape),
   };
+}
+
+// ---------- v2: supporting files ----------
+const FILES_UPGRADE = `Supporting files are part of Starter and Pro. Upgrade to attach a file to a claim: ${WHOP_PRODUCT_URL}`;
+const versionClaims = (v: any) => flagClaims(v.source === "captured" ? stripHeader(v.text) : v.text);
+
+function filePayload(f: any, versionSeal: string) {
+  return JSON.stringify({
+    v: 2, kind: "supporting_file", id: f.id, listing_id: f.listing_id, version_id: f.version_id, version_seal_hash: versionSeal,
+    claim: f.claim, name: f.name, sha256: f.sha256, mime: f.mime || null, note: f.note || null, attached_at: new Date(f.attached_at).toISOString(),
+  });
+}
+function fileIntact(f: any, versionSeal: string) {
+  const payload = filePayload(f, versionSeal);
+  return payload === f.sealed_payload && sha256((f.prev_hash || "") + payload) === f.seal_hash;
+}
+const shapeFile = (f: any, versionSeal: string) => ({
+  id: f.id, version_id: f.version_id, claim: f.claim, name: f.name, sha256: f.sha256, mime: f.mime, note: f.note,
+  attached_at: f.attached_at, seal_hash: f.seal_hash, intact: fileIntact(f, versionSeal),
+});
+
+// Pure input check: the claim must be one of this version's claims.
+function checkAttachment(b: any, claims: string[]): { error: string } | { claim: string; name: string; sha256: string; mime: string | null; note: string | null } {
+  const sha = String(b?.sha256 || "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(sha)) return { error: "sha256 must be 64 hex characters" };
+  const name = String(b?.name || "").trim().slice(0, 160);
+  if (!name) return { error: "name is required" };
+  const claim = String(b?.claim || "").trim();
+  if (!claims.includes(claim)) return { error: "Pick one of this version's claims" };
+  const note = String(b?.note ?? "").trim();
+  if (note.length > 280) return { error: "Keep the note to 280 characters or fewer" };
+  return { claim, name, sha256: sha, mime: String(b?.mime || "").slice(0, 80) || null, note: note || null };
+}
+
+async function attachFile(acct: Account, versionId: string, body: any) {
+  const [v] = await sql`select v.*, l.account_key_hash, l.url from listing_versions v join listings l on l.id = v.listing_id where v.id = ${versionId}`;
+  if (!v || v.account_key_hash !== acct.key_hash) return { error: "version not found", status: 404 };
+  if (!isPaid(acct)) return { error: FILES_UPGRADE, status: 402 };
+  const a = checkAttachment(body, versionClaims(v).map((c) => c.text));
+  if ("error" in a) return { error: a.error, status: 400 };
+  const [{ n }] = await sql`select count(*)::int as n from supporting_files where version_id = ${v.id}`;
+  if (n >= 20) return { error: "A version can hold 20 supporting files", status: 409 };
+  const row = await sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(424242)`;
+    const prevHash = await chainHead(tx);
+    const [{ t }] = await tx`select clock_timestamp() as t`;
+    const f = { id: randCode(12), version_id: v.id, listing_id: v.listing_id, ...a, attached_at: t };
+    const payload = filePayload(f, v.seal_hash);
+    const [r] = await tx`insert into supporting_files (id, version_id, listing_id, claim, name, sha256, mime, note, attached_at, prev_hash, seal_hash, sealed_payload)
+      values (${f.id}, ${f.version_id}, ${f.listing_id}, ${f.claim}, ${f.name}, ${f.sha256}, ${f.mime}, ${f.note}, ${t}, ${prevHash}, ${sha256(prevHash + payload)}, ${payload}) returning *`;
+    return r;
+  });
+  await logEvent("supporting_file_attached", null, { listing: v.listing_id, version: v.version_no });
+  return { file: { ...shapeFile(row, v.seal_hash), prev_hash: row.prev_hash } };
+}
+
+// ---------- v2: version history page ----------
+// Line-level diff (LCS). Very long texts fall back to a set comparison.
+function lineDiff(a: string[], b: string[]): { op: " " | "+" | "-"; line: string }[] {
+  const n = a.length, m = b.length;
+  if (n * m > 4e6) return [...a.map((line) => ({ op: "-" as const, line })), ...b.map((line) => ({ op: "+" as const, line }))]; // too long to compare line by line
+  const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out: { op: " " | "+" | "-"; line: string }[] = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ op: " ", line: b[j] }); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push({ op: "-", line: a[i++] });
+    else out.push({ op: "+", line: b[j++] });
+  }
+  while (i < n) out.push({ op: "-", line: a[i++] });
+  while (j < m) out.push({ op: "+", line: b[j++] });
+  return out;
+}
+
+const FLAG_LABEL: Record<Flag, string> = { income: "Income figure", guarantee: "Guarantee", time: "Time promise", absolute: "Absolute word", scarcity: "Urgency" };
+const flagPills = (flags: Flag[]) => flags.map((f) => `<span class="pill amb">${FLAG_LABEL[f]}</span>`).join("");
+const claimHtml = (c: { text: string; flags: Flag[]; suggestion: string | null }) => c.flags.length
+  ? `<div class="fl"><div class="small">${esc(c.text)}</div><div class="row" style="margin:4px 0">${flagPills(c.flags)}</div><div class="tiny">${esc(c.suggestion)}</div></div>`
+  : `<div class="small dim">${esc(c.text)}</div>`;
+const intactLabel = (ok: boolean) => `<span class="small ${ok ? "ok" : "bad"}">${ok ? "Intact" : "Fingerprint mismatch"}</span>`;
+
+function historyHtml(h: NonNullable<Awaited<ReturnType<typeof loadHistory>>>) {
+  const { listing, rows, files, paid } = h;
+  const visible = paid ? rows : rows.slice(0, 1);
+  const hidden = rows.length - visible.length;
+  const sections = visible.map((v: any, k: number) => {
+    const prev = paid ? rows[k + 1] : null;
+    const lines = v.text.split("\n");
+    const diff = prev ? lineDiff(prev.text.split("\n"), lines) : lines.map((line: string) => ({ op: " ", line }));
+    const added = diff.filter((d) => d.op === "+").length, removed = diff.filter((d) => d.op === "-").length;
+    const prices = lines.filter((l: string) => HEADER_LINE.test(l) || PLAN_OPTION_LINE.test(l));
+    const claims = versionClaims(v);
+    const flagged = claims.filter((c) => c.flags.length);
+    const vf = files.filter((f: any) => f.version_id === v.id);
+    const attach = paid
+      ? `<form class="att stack" data-v="${v.id}" style="margin-top:8px;gap:6px"><select name="claim">${claims.map((c) => `<option value="${esc(c.text)}">${c.flags.length ? "Flagged: " : ""}${esc(c.text.slice(0, 90))}</option>`).join("")}</select>
+<input type="file" name="file"><input name="note" maxlength="280" placeholder="Short note (optional, up to 280 characters)"><div class="row"><button class="btn">Attach supporting file</button><span class="tiny msg"></span></div>
+<span class="tiny">Fingerprinted on your device. The file itself is never uploaded.</span></form>`
+      : `<p class="small muted" style="margin:6px 0 0">Supporting files are part of Starter and Pro. <a href="${esc(WHOP_PRODUCT_URL)}">Upgrade</a> to attach a file to a claim.</p>`;
+    return `<div class="card stack">
+<div class="row" style="justify-content:space-between"><h2 style="font-size:20px">Version ${v.version_no}</h2>${v.source === "entered_by_seller" ? `<span class="tiny">Entered by you</span>` : ""}</div>
+<div class="tiny">First seen ${esc(fmtDate(v.first_seen_at))} · Last seen ${esc(fmtDate(v.last_seen_at))}</div>
+<div class="small">${prices.map(esc).join("<br>")}</div>
+<div class="tiny">${prev ? `Changes since version ${prev.version_no}: ${added} line${added === 1 ? "" : "s"} added, ${removed} removed` : rows.length > 1 && !paid ? "Latest version" : "First version captured"}</div>
+<div class="diff">${diff.map((d) => (d.op === "+" ? `<ins>${esc(d.line)}</ins>` : d.op === "-" ? `<del>${esc(d.line)}</del>` : `<span>${esc(d.line)}</span>`)).join("")}</div>
+<h3>${flagged.length} of ${claims.length} claims flagged</h3>
+${flagged.map(claimHtml).join("")}
+<h3>Supporting files</h3>
+${vf.length ? vf.map((f: any) => `<div class="small">${esc(f.name)} · for "${esc(f.claim.slice(0, 80))}"${f.note ? `<div class="tiny">${esc(f.note)}</div>` : ""}<div class="hash">sha-256 ${esc(f.sha256)} · attached ${esc(fmtDate(f.attached_at))}</div><div class="row"><span class="hash">seal ${esc(f.seal_hash.slice(0, 12))}…</span>${intactLabel(fileIntact(f, v.seal_hash))}</div></div>`).join("") : `<p class="tiny" style="margin:0">None yet.</p>`}
+${attach}
+<div class="row" style="justify-content:space-between;border-top:1px dashed var(--line);padding-top:8px"><span class="hash">seal sha-256 ${esc(v.seal_hash)}</span>${intactLabel(verifyVersion(listing, v))}</div></div>`;
+  }).join("");
+  return `<h1 style="font-size:24px">${esc(listing.title || "Your listing")}</h1>
+<div class="hash" style="margin:4px 0">${esc(listing.url)}</div>
+<p class="small muted" style="margin:0 0 14px">${rows.length} version${rows.length === 1 ? "" : "s"} stored</p>
+<div class="stack">${sections}
+${hidden ? `<div class="card small">${hidden} earlier version${hidden === 1 ? "" : "s"} stored; upgrade to open ${hidden === 1 ? "it" : "them"}. <a href="${esc(WHOP_PRODUCT_URL)}">See Starter and Pro</a></div>` : ""}</div>
+<p class="tiny" style="margin-top:16px">${DISCLAIMER}</p>`;
+}
+
+function listingPage(inner: string) {
+  return page("Vouch — listing history", `<div class="wrap">
+${topbar(`<a class="btn" href="/check">Check a listing</a>`)}
+${KEYBOX}<div id="main">${inner}</div></div>`, {
+    script: `
+const $=id=>document.getElementById(id);let KEY=null;try{KEY=localStorage.getItem('vouch_key')}catch(e){}
+async function load(){if(!KEY){$('keybox').style.display='block';return}
+const r=await fetch(location.pathname+'?frag=1',{headers:{authorization:'Bearer '+KEY}});
+if(r.status===401){$('keybox').style.display='block';$('keyerr').textContent=${JSON.stringify(KEY_INACTIVE)};return}
+$('keybox').style.display='none';$('main').innerHTML=await r.text();bind()}
+function bind(){document.querySelectorAll('form.att').forEach(f=>f.onsubmit=async e=>{e.preventDefault();const m=f.querySelector('.msg'),file=f.file.files[0];if(!file){m.textContent='Choose a file first.';return}
+m.textContent='Fingerprinting…';const h=[...new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()))].map(b=>b.toString(16).padStart(2,'0')).join('');
+const r=await fetch('/api/versions/'+f.dataset.v+'/files',{method:'POST',headers:{authorization:'Bearer '+KEY,'content-type':'application/json'},body:JSON.stringify({claim:f.claim.value,name:file.name,mime:file.type,sha256:h,note:f.note.value})});
+const d=await r.json().catch(()=>({}));if(!r.ok){m.textContent=d.error||'Could not attach';return}load()})}
+$('savekey').onclick=()=>{KEY=$('key').value.trim();try{localStorage.setItem('vouch_key',KEY)}catch(e){}$('keyerr').textContent='';load()};
+if($('main').innerHTML.trim())bind();else load();`,
+  });
+}
+
+// ---------- v2: free risk check page ----------
+function checkPage() {
+  return page("Vouch — check your Whop listing free", `<div class="wrap">
+${topbar(`<a class="btn" href="/">How Vouch works</a>`)}
+<h1 style="font-size:28px">Check your Whop listing</h1>
+<p class="small muted" style="margin:6px 0 0">Vouch reads the public page and flags claims that often lead to disputes: income figures, guarantees, time promises, urgency and absolute words. Nothing is saved.</p>
+<label for="u">Paste your Whop listing link</label><input id="u" type="url" placeholder="https://whop.com/your-store/your-product/">
+<div style="margin-top:12px"><button class="btn primary full" id="go">Check my listing free</button></div>
+<div id="out"></div>
+<p class="tiny" style="margin-top:22px">${DISCLAIMER}</p></div>`, {
+    desc: "Paste your Whop listing link to see which claims often lead to disputes.",
+    script: `
+const $=id=>document.getElementById(id);$('u').onkeydown=e=>{if(e.key==='Enter')$('go').click()};
+$('go').onclick=async()=>{const o=$('out'),b=$('go');b.disabled=true;o.innerHTML='<p class="small muted">Reading the page…</p>';let r=null,d={};
+try{r=await fetch('/api/risk-check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:$('u').value,html:1})});d=await r.json()}catch(e){}b.disabled=false;
+if(r&&r.ok){o.innerHTML=d.html;return}
+const lim=r&&r.status===429,c=document.createElement('div');c.className='card'+(lim?' fl':'');c.style.marginTop='16px';
+c.innerHTML=(lim?'<h3>That&#39;s the free limit for now</h3>':'')+'<p class="small"></p>';c.querySelector('p').textContent=d.error||'Something went wrong. Try again.';o.replaceChildren(c)};`,
+  });
+}
+
+// The /check result, rendered here so the page script stays small. Every value is escaped.
+function checkResultHtml(title: string | null, text: string, claims: ReturnType<typeof flagClaims>) {
+  const flagged = claims.filter((c) => c.flags.length).length;
+  return `<div class="card" style="margin-top:16px"><h2 style="font-size:20px">${esc(title || "Your listing")}</h2>${text.split("\n").filter((l) => HEADER_LINE.test(l)).map((l) => `<div class="small muted">${esc(l)}</div>`).join("")}</div>
+<p class="small">${flagged} of ${claims.length} claims worth a look</p><div class="stack">${claims.map(claimHtml).join("")}</div>
+<div class="card" style="margin-top:18px"><h3>Keep a dated record of this listing</h3><p class="small muted">Vouch Free watches 1 listing, re-checks it every day and saves each change as a dated version.</p><a class="btn primary full" href="${esc(WHOP_FREE_URL)}">Start watching it free</a><p class="tiny">${DISCLAIMER}</p></div>`;
+}
+
+async function headlineStats() {
+  const rows = await sql`select meta::jsonb->>'variant' as v, name, count(*)::int as n from events where name in ('landing_view', 'check_click') group by 1, 2`;
+  const count = (v: string, name: string) => (rows as any[]).find((r) => r.v === v && r.name === name)?.n || 0;
+  const variants: Record<string, unknown> = {};
+  for (const v of Object.keys(HEADLINES) as Variant[]) {
+    const views = count(v, "landing_view"), clicks = count(v, "check_click");
+    variants[v] = { headline: HEADLINES[v][0], views, clicks, click_rate: views ? Math.round((clicks / views) * 10000) / 10000 : null };
+  }
+  return { variants };
 }
 
 // Daily job: re-capture every watched listing. Two failures in a row mark it stale.
@@ -1493,16 +1717,52 @@ async function route(req: Request, connIp: string | null = null): Promise<Respon
   const url = new URL(req.url);
   const p = url.pathname;
   const m = req.method;
+  const authed = () => authenticate(keyFrom(req, url));
+  const noKey = () => json({ error: "invalid or inactive key" }, 401);
 
   if (m === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, content-type, mcp-session-id, mcp-protocol-version", "access-control-allow-methods": "GET, POST, DELETE, OPTIONS" } });
   if (p === "/health") return json({ ok: true, version: VERSION });
-  if (p === "/" && m === "GET") return html(landingPage());
+  if (p === "/" && m === "GET") {
+    const hv = headlineVariant(req.headers.get("cookie"));
+    await logEvent("landing_view", null, { variant: hv.v });
+    const res = html(landingPage(hv.v));
+    res.headers.set("cache-control", "private, no-store");
+    if (hv.isNew) res.headers.set("set-cookie", `${HL_COOKIE}=${hv.v}; Path=/; Max-Age=7776000; SameSite=Lax; HttpOnly`);
+    return res;
+  }
+  if (p === "/check" && m === "GET") {
+    // check_click = arrived from the landing-page hero button, counted against the visitor's headline variant.
+    const hv = headlineVariant(req.headers.get("cookie"));
+    if (url.searchParams.get("src") === "hero" && !hv.isNew) await logEvent("check_click", null, { variant: hv.v });
+    return html(checkPage());
+  }
+  if (p === "/admin/headline-test" && m === "GET") {
+    if (!ADMIN_KEY || url.searchParams.get("key") !== ADMIN_KEY) return json({ error: "forbidden" }, 403);
+    return json(await headlineStats());
+  }
+  let lh = p.match(/^\/listings\/([A-Z0-9]{10})$/);
+  if (lh && m === "GET") {
+    // Signed-in view: the page reads the stored vouch_key and fetches ?frag=1 with it; API clients can send the key directly.
+    const key = keyFrom(req, url);
+    const acct = key ? await authenticate(key) : null;
+    const h = acct ? await loadHistory(acct, lh[1]) : null;
+    const inner = h ? historyHtml(h) : acct ? `<h1 style="font-size:22px">Listing not found</h1><p class="small muted">This account isn't watching a listing with that id.</p>` : "";
+    const status = key && !acct ? 401 : acct && !h ? 404 : 200;
+    return new Response(url.searchParams.get("frag") ? inner : listingPage(inner), { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  }
+  let vf = p.match(/^\/api\/versions\/([A-Z0-9]{12})\/files$/);
+  if (vf && m === "POST") {
+    const acct = await authed();
+    if (!acct) return noKey();
+    const r: any = await attachFile(acct, vf[1], await req.json().catch(() => ({})));
+    return r.error ? json({ error: r.error }, r.status) : json(r, 201);
+  }
   if (p === "/app" && m === "GET") return html(appPage());
   if (p === "/mcp") return handleMcp(req, url);
 
   if (p === "/api/me") {
-    const acct = await authenticate(keyFrom(req, url));
-    if (!acct) return json({ error: "invalid or inactive key" }, 401);
+    const acct = await authed();
+    if (!acct) return noKey();
     let a: any = acct;
     if (m === "POST") {
       const body: any = await req.json().catch(() => ({}));
@@ -1516,22 +1776,22 @@ async function route(req: Request, connIp: string | null = null): Promise<Respon
   if (wd && m === "GET") return whopDashboard(req, wd[1]);
   if (p === "/link" && m === "GET") return new Response(linkPage(), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   if (p === "/api/link" && m === "POST") {
-    const acct = await authenticate(keyFrom(req, url));
-    if (!acct) return json({ error: "invalid or inactive key" }, 401);
+    const acct = await authed();
+    if (!acct) return noKey();
     const body: any = await req.json().catch(() => ({}));
     const r: any = await linkAccount(acct, String(body?.t || ""));
     return r.error ? json({ error: r.error }, r.status) : json(r);
   }
   if (p === "/api/whop/products" && m === "GET") {
-    const acct = await authenticate(keyFrom(req, url));
-    if (!acct) return json({ error: "invalid or inactive key" }, 401);
+    const acct = await authed();
+    if (!acct) return noKey();
     const r: any = await whopProducts(acct);
     return r.error ? json({ error: r.error }, r.status) : json(r);
   }
 
   if (p === "/api/reviews" && m === "POST") {
-    const acct = await authenticate(keyFrom(req, url));
-    if (!acct) return json({ error: "invalid or inactive key" }, 401);
+    const acct = await authed();
+    if (!acct) return noKey();
     const body: any = await req.json().catch(() => ({}));
     const r: any = await createReview(acct, body);
     return r.error ? json({ error: r.error }, r.status || 400) : json(r, 201);
@@ -1539,8 +1799,8 @@ async function route(req: Request, connIp: string | null = null): Promise<Respon
 
   // ----- v2 listings -----
   if (p === "/api/listings") {
-    const acct = await authenticate(keyFrom(req, url));
-    if (!acct) return json({ error: "invalid or inactive key" }, 401);
+    const acct = await authed();
+    if (!acct) return noKey();
     if (m === "GET") return json({ plan: acct.plan, limit: listingLimitFor(acct.plan), listings: await listListings(acct) });
     if (m === "POST") {
       const body: any = await req.json().catch(() => ({}));
@@ -1552,8 +1812,8 @@ async function route(req: Request, connIp: string | null = null): Promise<Respon
   }
   let lv = p.match(/^\/api\/listings\/([A-Z0-9]{10})\/versions$/);
   if (lv && m === "GET") {
-    const acct = await authenticate(keyFrom(req, url));
-    if (!acct) return json({ error: "invalid or inactive key" }, 401);
+    const acct = await authed();
+    if (!acct) return noKey();
     const r = await listingVersions(acct, lv[1]);
     return r ? json(r) : json({ error: "listing not found" }, 404);
   }
@@ -1571,7 +1831,7 @@ async function route(req: Request, connIp: string | null = null): Promise<Respon
       const cap = await captureListing(String(body.url || ""));
       const claims = flagClaims(stripHeader(cap.text));
       await logEvent("risk_check", null, { flagged: claims.filter((c) => c.flags.length).length, claims: claims.length });
-      return json({ url: cap.url, title: cap.title, captured_at: cap.capturedAt, default_plan: cap.defaultPlan, plans_count: cap.plansCount, text: cap.text, listing_hash: cap.listingHash, claims, view: "public signed-out view" });
+      return json({ url: cap.url, title: cap.title, captured_at: cap.capturedAt, default_plan: cap.defaultPlan, plans_count: cap.plansCount, text: cap.text, listing_hash: cap.listingHash, claims, view: "public signed-out view", ...(body.html ? { html: checkResultHtml(cap.title, cap.text, claims) } : {}) });
     } catch (e: any) {
       return json({ error: e?.message || "Couldn't read that page" }, 400);
     }
@@ -1667,5 +1927,5 @@ if (!UNIT_TEST) {
 }
 
 // For test/unit.ts (pure functions; no database or network except the JWKS URL).
-export { verifyWhopToken, signLinkToken, verifyLinkToken, productPublicUrl, productForUrl, planLine, plansText, normalizePlan, withPlans, stripHeader, clientIp, LINK_TTL_SECONDS };
+export { verifyWhopToken, signLinkToken, verifyLinkToken, productPublicUrl, productForUrl, planLine, plansText, normalizePlan, withPlans, stripHeader, clientIp, LINK_TTL_SECONDS, lineDiff, headlineVariant, checkAttachment, filePayload, fileIntact, landingPage, HEADLINES, checkResultHtml, historyHtml };
 export const _jwksFetches = () => jwksFetches;
